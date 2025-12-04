@@ -45,33 +45,66 @@ class GoStraight(smach.State):
                              input_keys=['scan', 'data_available'])
 
     def execute(self, userdata):
-        global pub
-        rospy.loginfo("\n>>> [STATE] BARRIDO (SWEEPING)")
+        global pub, current_yaw
+        rospy.loginfo("\n>>> [STATE] BARRIDO INTELIGENTE (Active Heading Hold)")
         rate = rospy.Rate(10)
         move = Twist()
         
+        CARDINALS = [0.0, math.pi/2, math.pi, -math.pi/2]
+        
+        normalized_yaw = current_yaw
+        
+        target_angle = min(CARDINALS, key=lambda x: abs(x - normalized_yaw))
+        
+        if abs(normalized_yaw) > 3.0: # Si estamos mirando hacia atrás
+            if normalized_yaw > 0: target_angle = math.pi
+            else: target_angle = -math.pi
+
+        rospy.loginfo("    -> Rumbo fijado: %.2f rad (%.2f deg)", target_angle, math.degrees(target_angle))
+        
+        # CONSTANTE DE CORRECCIÓN (KP)
+        KP_CORRECTION = 1.0
+
         while not rospy.is_shutdown():
             if userdata.data_available:
+                # --- A. VERIFICAR PARED (SEGURIDAD) ---
                 ranges = userdata.scan.ranges
-                # Cono frontal
                 front_cone = ranges[0:10] + ranges[-10:]
                 front_cone = [x if x != float('inf') else 10.0 for x in front_cone]
                 min_front = min(front_cone)
                 
-                # Telemetría ligera
-                rospy.loginfo_throttle(2, "[SWEEP] Wall distance: %.2fm", min_front)
+                # Telemetría
+                rospy.loginfo_throttle(1, "[SWEEP] Wall: %.2fm | Angle Err: %.2f deg", 
+                                    min_front, math.degrees(target_angle - current_yaw))
                 
                 if min_front < 0.6:
                     rospy.logwarn("!!! WALL DETECTED (%.2fm). Stopping !!!", min_front)
                     move.linear.x = 0.0
+                    move.angular.z = 0.0
                     pub.publish(move)
                     return 'wall_detected'
                 
-                move.linear.x = 0.3
+                # --- B. CONTROLADOR DE RUMBO (MANTENER LÍNEA RECTA) ---
+                # Calculamos el error angular
+                error_yaw = target_angle - current_yaw
+                
+                # Normalizamos el error (el salto de +/- 180 grados)
+                while error_yaw > math.pi: error_yaw -= 2*math.pi
+                while error_yaw < -math.pi: error_yaw += 2*math.pi
+                
+                # Aplicamos la corrección
+                correction_z = error_yaw * KP_CORRECTION
+                
+                # Limitamos la corrección para que no vaya haciendo "eses" bruscas
+                correction_z = max(min(correction_z, 0.3), -0.3)
+
+                # --- C. ENVIAR COMANDO ---
+                move.linear.x = 0.3        # Velocidad constante hacia adelante
+                move.angular.z = correction_z # Pequeños ajustes de volante
+                
                 pub.publish(move)
             rate.sleep()
         return 'aborted'
-
 # --- STATE 2: ---
 class UTurn(smach.State):
     def __init__(self):
